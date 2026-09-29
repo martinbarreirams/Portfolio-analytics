@@ -1,0 +1,155 @@
+---
+title: "Practica 1"
+author: "Martín Barreira Montesanto"
+date: "2025-03-01"
+output:
+  word_document: default
+  pdf_document: default
+subtitle: "Consumo electrico en Bélgica 2012-2023 (GWh)"
+---
+# 1.Introducción
+
+Antes de comenzar, es importante presentar la finalidad del documento e introducir el contenido. En primer lugar, pretende realizar un análisis detallado de la serie temporal proporcionada por la base de datos **ELE_Belgica**. Dicha base incluye datos acerca del consumo eléctrico en Bélgica, reúne información desde el 01-2012 hasta el 12-2023. También, conviene saber que el consumo viene medido en Gigavatios-hora (QWh).
+
+# 2.Antes del análisis
+
+## Descarga de librerias necesarias
+
+Las librerías a utilizar para esta práctica son:  *forecast* y *ggplot2*. 
+
+ 
+```{r Librerias, message = FALSE, warning= FALSE}
+
+library(forecast)
+library(ggplot2); theme_set(theme_bw())
+
+
+```
+
+ 
+## Datos 
+ 
+ 
+Una vez se hayan cargado las librerias, es momento de cargar las base de datos **ELE_Belgica** y manipularla para formar una serie temporal, a la cual se le asigna el nombre **cons_elec**. Para finalizar, se indica que la serie comienza en enero de 2012 y que se trata de una serie mensual(*frequency = 12*).
+ 
+ 
+```{r Datos, cache=TRUE, message = FALSE, warning= FALSE,}
+ELE_Belgica<-read.csv2("./ELE_Belgica.csv")
+
+cons_elec <-ts(ELE_Belgica, start = c(2012, 1), frequency = 12) 
+
+head(cons_elec, 5)#Primeros 5 datos de la serie
+```
+
+# 3.Análisis
+
+## Serie temporal
+
+En este punto, es hora de graficar la serie temporal y comenzar a observar sus características principales. El gráfico recibe el nombre de *Figura 1*.
+
+```{r Autoplot, message = FALSE, warning= FALSE}
+Figura_1 <- autoplot(cons_elec, xlab= " ", ylab= "Consumo")+
+  labs(title ="Consumo electrico Bélgica (GWh)", caption = "FIGURA 1")+
+   geom_hline(yintercept = mean(cons_elec))
+
+Figura_1
+```
+
+
+Tal y como se observa, la *Figura 1* muestra la serie en su totalidad. A simple vista se puede intuir cierta tendencia decreciente casi desde el comienzo de la serie, estacionalidad y diversos valores que llaman la atención, especialmente a principios y mediados de 2023, puesto que quedan, relativamente próximo a la media (6755 GWh) y excesivamente alejado de ella. Sin embargo, todos estos aspectos serán estudiados de forma más especifica durante el análisis
+
+*La Figura 1*, tiene una finalidad más bien orientativa, en vez de analítica. A continuación, se muestran más gráficos que permiten profundizar en la serie.
+
+## Tipo de esquema
+En ocasiones, a partir de un gráfico como el de la *Figura 1* se puede identificar el tipo de esquema del que se trata. Sin embargo, en esta ocasión, era de gran dificultad saber si se trataba de un esquema multiplicativo o aditivo, y es por ello que se crea la *Figura 2*.
+
+```{r esquema,  message = FALSE, warning= FALSE}
+CasosAno = aggregate(cons_elec, FUN = mean)
+DesviacionAno = aggregate(cons_elec, FUN = sd)
+
+ggplot() +
+  geom_point(aes(x = CasosAno, y = DesviacionAno), size = 2) +
+  xlab("Media de consumo (anual)") + 
+  ylab("Des. típica")+ labs(title = "Gráfica media-desviación", caption = "Figura 2" )
+
+```
+A pesar de que no es un esquema claro, se puede concluir que se trata de un esquema aditivo debido a que en ciertos puntos,  mayor consumo no implica una mayor desviación. Aunque, es necesario recalcar que los esquemas suelen ser mixtos. 
+
+## Tendencia
+Con el fin de descubrir la verdadera tendencia de la seria **cons_elec**, se ha decidido convertir esta serie mensual en una serie anual, calculando un valor medio por año (*Figura 3*).
+
+```{r Figura 3 (Tendencia),  message = FALSE, warning= FALSE}
+cons_anual<- aggregate(cons_elec, FUN = mean)
+
+Figura_3<- autoplot(cons_anual, xlab = " ", ylab = "Consumo electrico (GWh)")+
+  labs(title= "Tendencia", caption = "FIGURA 3")
+
+Figura_3
+
+```
+
+Se observa como durante los primeros cuatro años (2012-2016) la serie se mantiene estacionaria, sin embargo, es en 2016 cuando comienza la tendencia decreciente, y aunque pareciera que en 2020 podía cesar el decrecimiento, en 2021, regresa con una pendiente más pronunciada que persigue a la serie hasta su final (12-2023).
+
+## Estacionalidad
+
+En la *Figura 1* se observaban signos d estacionalidad en la serie, aunque es ahora cuando esta se va a analizar en mayor profundidad creando un gráfico que muestre el comportamiento de la serie en los diferentes meses durante los diferentes años (*Figura 4*).
+
+```{r Figura 4 (Estacionalidad), message = FALSE, warning= FALSE}
+
+Figura_4 <- ggseasonplot(window(cons_elec, start = 2018),
+ year.labels = TRUE, xlab = "",ylab = "Nacimientos")+ 
+  labs(title = "Estacionalidad (Intraanual)", caption = "FIGURA 4")
+
+Figura_4
+```
+
+La *Figura 4* no permite analizar con claridad la estacionalidad de la serie, aunque si que permite hacerse una idea de la estacionalidad de la serie. Es por ello que se ha decidido llevar a cabo el calculo de la componente estacional mediante la función *tapply*:
+
+```{r componente estacional, message = FALSE, warning= FALSE }
+
+ comp_estac <-tapply(cons_elec/mean(cons_elec),
+ cycle(cons_elec),
+ FUN= mean)
+
+ (round(comp_estac, 2))
+
+```
+
+En esta ocasión, si que se identifica el comportamiento de la estacionalidad. En lineas generales, los valores más llamativos se dividen en dos grupos, los meses de invierno y los de verano. Por un lado, noviembre, diciembre, enero y febrero muestran valores por encima de la media, destacando Enero y Diciembre con un **13%** y **8%**, respectivamente, más de consumo. En verano, ocurre lo contrario, mayo, junio, julio y agosto protagonizan los valores inferiores al promedio. Sin embargo, el valor más anómalo es el de marzo, que sin pertenecer al periodo de invierno, supone un consumo de un 6% mayor.
+
+Estas variaciones estacionales pueden ser causadas por pasar más tiempo en casa durante los meses de invierno y por ello tener un mayor consumo eléctrico y al uso de calefacción. En cambio, en verano ocurriría lo contrario, además que durante las vacaciones las empresas cierran.
+
+
+
+
+## Residuo e intervención
+
+Por último, queda analizar el residuo de la serie, el cual, al graficarlo junto a referencias de la desviación tícpica, permite identificar los valores atípicos y las posibles intervenciones de la serie. 
+
+```{r residuo,  message = FALSE, warning= FALSE }
+consumoStl <- stl(cons_elec[,1], s.window = "periodic", robust = TRUE)
+error<- remainder(consumoStl)
+sderror <- sd(error)
+
+Figura_5 <- autoplot(error, xlab = " ", ylab = "Consumo electrico (GWh)")+ 
+  labs(title = "Residuo", caption = "FIGURA 5")+
+  geom_hline(yintercept = c(-3, -2, 2, 3)*sderror, 
+             colour = c("red", "green", "green", "red"), 
+             lty = 2)  + geom_point()
+
+Figura_5
+
+```
+
+Tal y como se observa en la *Figura 5*, existen diversas apariciones destacables a lo largo de la serie. Estos valores toman presencia en las fechas:
+
+```{r fechas atipicos,  message = FALSE, warning= FALSE }
+fechas <- format(seq(as.Date("2012-01-01"), as.Date("2023-12-01"), by = "months"), "%Y-%m")
+
+
+fechas[abs(error) > 2 * sderror]
+
+
+```
+En primer lugar, la mayor "intervención" de todas, **2012-02**, pudo ser causada a una ola de frio experimentada en Europa durante dicho invierno aunque, el valor es excesivamente anómalo, por lo que se puede tratar de un fallo. Las dos coincidencias de marzo (2013-03 y 2018-03) no han sido respaldadas por ningún evento nacional, simplemente son consecuencia del azar. En cambio, **2020-04** coincide a la perfeción con las medidas tomadas en la pandemia de Covid-19, cuando miles de empresas se vieron obligadas a cesar su actividad temporalmente. Por último, los valores de octubre y noviembre de 2022 pudieron ser efecto de la tensión geopolítica existente en Europa que desencadenó una crisis energética, por lo que estos valores atipícamente bajos serian resultado de las iniciativas para reducir la demanda energética.
+
