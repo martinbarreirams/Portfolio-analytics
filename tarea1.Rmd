@@ -1,0 +1,359 @@
+---
+title: "Tarea 1. Extracción de datos en tres enfoques"
+subtitle: "Datos no estructurados"
+author: "Martín Barreira"
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+lang: es
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+# Introducción y pregunta de partida
+
+El objetivo de este trabajo es explorar la evolución del precio de los carburantes en España y su posible relación con la expansión del vehículo eléctrico. Para ello, se utilizan tres enfoques de extracción de datos: un fichero JSON de la CNMC, una API de Eurostat y una tabla publicada en una página web especializada que utiliza datos de matriculaciones de la DGT. Las fuentes permiten observar tanto la evolución de los precios y su componente fiscal como la evolución de las matriculaciones de turismos eléctricos. Aunque los datos no permiten establecer por sí solos una relación causal, su análisis conjunto ofrece un punto de partida para estudiar la transformación del mercado automovilístico en España.
+
+Pregunta: ¿cómo se relaciona la evolución del precio de los carburantes en España con la matriculación de coches eléctricos?
+
+```{r paquetes}
+# Paquetes necesarios. Si falta alguno: install.packages("nombre")
+library(jsonlite)
+library(dplyr)
+library(readxl)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(httr)
+
+install.packages(
+  "eurostat",
+  repos = "https://cran.rstudio.com/",
+  type = "binary"
+  
+)
+library(eurostat)
+packageVersion("eurostat")
+packageVersion("httr2")
+packageVersion("rlang")
+```
+
+# Bloque 1. Fuente abierta en formato JSON
+
+## Contexto de los datos
+
+*(Rellenar: qué es la CNMC, qué recoge este conjunto, para qué sirve, licencia y por qué lo elijo.)*
+Este conjunto de datos ha sido elaborado por la Comisión Nacional de los Mercados y la Competencia (CNMC).La CNMC es el organismo encargado de promover y preservar el funcionamiento del mercado.
+
+El conjunto de datos recibe como nombre: **Precios diarios provinciales -2026-**, y ofrece información sobre los precios medios diarios provinciales de expresados en **€/litro**, de los siguientes productos: gasolina 95 E5, gasolina 98 E5, gasóleo A (gasóleo de automoción) y gasóleo A Premium. El conjunto incluye los precios de venta al publico (PVP) y los precios antes de impuestos (PAI). El precio que muestra se obtiene a partir del promedio del precios que ofrecen las estaciones de servicio en cada provincia, siendo su última actualización el *14/102026 a las 11:18*.
+
+licencia
+
+
+Fuente: Comisión Nacional de los Mercados y la Competencia (CNMC), conjunto "Precios diarios provinciales - 2026", publicado en datos.gob.es.
+
+
+## Descarga del fichero
+
+Con el objetivo de que el documento sea reproducible el otros dispositivos, se han tomado diferentes medidas en este apartado de *descarga*. En primer lugar se guarda una copia local en la carpeta `data/` para que el documento se pueda reproducir en otro ordenador. Al mismo tiempo, se utiliza la función `file.path`, para crear la ruta de manera compatible en Windows y Mac.
+Entonces, se comprueba si el fichero está descargado y en caso de que no lo esté, se descarga desde la url y lo guarda en la ruta de manera binaria `(wb)`.
+
+
+```{r descarga}
+url_json <- "https://catalogodatos.cnmc.es/dataset/1cb78e4a-f0d4-4ba0-b24a-ac20d89c1096/resource/96046c4d-6e37-4287-8b14-2bad004dda5c/download/ds_24470_1.json"
+
+
+dir.create("data", showWarnings = FALSE)
+ruta_json <- file.path("data", "precios_provinciales_2026.json")
+
+if (!file.exists(ruta_json)) {
+  download.file(url_json, ruta_json, mode = "wb")
+}
+
+file.size(ruta_json)
+```
+
+## Inspección de la estructura
+
+Antes de transformar nada, se mira cómo es el fichero en bruto.
+
+```{r inspeccion_bruto}
+# Primeras líneas del texto tal cual está en el fichero
+cat(readLines(ruta_json, n = 7, warn = FALSE), sep = "\n")
+```
+Una vez se conoce la estructura, se observa como el formato (JSON) es una lista de objetos en la cual los campos se repiten en cada fila. Por ello, se aplica la funcion `fromJSON`, directamente en la ruta, para que sobre el patron de los campos que se repiten, cree un **dataframe** que tenga como atributos los campos de cada fila.
+
+Posteriormente con la función `class` se comprueba que es un dataframe, `names`comprueba que los atributos son exactamente los campos del conjunto JSON y por último, `str` muestra la estructura completa: número de observaciones (59403) y las variables con su respectivo formato y una muestra de sus valores. 
+
+
+
+```{r inspeccion_r}
+datos_raw <- fromJSON(ruta_json)
+
+class(datos_raw)
+names(datos_raw)
+str(datos_raw)
+```
+## Diccionario de variables
+
+Antes de continuar con la limpieza del `dataframe`, es importante conocer las variables, en total 5. En primer lugar, **fecha_precio** representa la fecha de la que se obtuvo el precio del combustible, **provincia** la provincia de España donde se encuentra dicho precio ordenadas por orden alfabético, **producto** el tipo de combustible del cual trata la información, que incluye: "Gasolina 95 E5" "Gasolina 98 E5" "Gasóleo A habitual" Y "Gasóleo Premium". Por último, se utilizan dos variables diferentes para explicar el precio de los combustibles. Por un lado, **promedio_de_pvp_diario_cubo**, es decir,siendo la "Media aritmética de los precios de venta al público remitidos por cada estación de servicio operativa" (CNMC, 2026). Por otro lado, **promedio_de_pai_diario_cubo**, el precio antes de impuestos (PAI), obtenido restando a cada precio de venta al público de las estaciones de servicio el IVA y el impuesto sobre hidrocarburos, y después se calcula su media aritmética provincial de forma similar a la del PVP (CNMC, 2026).
+
+## Transformación a un dataframe limpio
+
+Es momento de limpiar el dataframe para poder empezar a trabajar con él de una forma más clara, intuitiva y eficiente.
+
+Lo primero que hace el código es simplemente renombrar (`rename`) las variables *fecha_precio*, *promedio_de_pai_diario_cubo* y *promedio_de_pvp_diario_cubo* a **fecha**, **pai** y **pvp** respectivamente, para agilizar su uso y sean mas claras. En segundo lugar, se modifica el formato de dos de las variables observados en la estructura del conjunto de datos para mejorar su utilidad. Se trata de transformar la variable *fecha* a formato `date` y *producto* a `factor` a partir de la función ``mutate` junto con `as.Date` y `factor`. Como último detalle, se ha modificado el orden de la columna ´provincia´ para que la visualización de la información de más intuitiva.
+
+
+```{r limpieza}
+df <- datos_raw %>% 
+  as_tibble() %>% 
+  rename(
+    fecha = fecha_precio,
+    pai   = promedio_de_pai_diario_cubo,
+    pvp   = promedio_de_pvp_diario_cubo
+  ) %>% 
+  mutate(
+    fecha    = as.Date(fecha),
+    producto = factor(producto)
+  ) %>% 
+  relocate(provincia)
+df[1:3,1:5]
+```
+De esta manera, el dataframe estaría listo para ser utilizado:
+```{r dataframe limpio, include=FALSE}
+df[1:4,1:5]
+
+```
+
+
+## Información útil
+
+El conjunto de datos ofrece la oportunidad de hacer diversos análisis de gran interés dadas la situación global respecto a los combustibles, aunque la información que se obtenga permita permita responder preguntas únicamente sobre la situación en España, de forma directa. Por ejemplo, ¿Cómo ha sido la fluctuación del precio del combustible y que parte de este está suponen los impuestos?.  
+
+Para simplificar el análisis y hacerlo más compacto, se han llevado a cabo ciertas modificaciones en el dataframe antes de entrar en tema impuestos. Primero, mediante un a función `flter` se excluyen del análisis las provincias no peninsulares que hay en el conjunto de datos, ya que, la legislación es diferente respecto a los impuestos en combustibles y también al "Gasolina 98 E5" y "Gasóleo", para simplificar pero también, poder comparar gasolina y gasóleo. Al mismo tiempo, la variable `fecha` pasa de ser diaria a mensual, con el uso de la función `floor_date`, la cual convierte cada fecha de un mes al primer día de ese mes y de este modo que todas las fechas del mes tengan el mismo identificador. En consecuencia, se agrupan los datos por mes y producto para que mediante `summarise` obtener una fila por cada combinación y transformar `pvp` y `pai` en medias mensuales.
+
+```{r preparacion del analisis}
+no_peninsula <- c("Ceuta", "Melilla", "Palmas, Las",
+                  "Santa Cruz de Tenerife", "Balears, Illes")
+
+mensual <- df %>% 
+  filter(!provincia %in% no_peninsula,
+         producto %in% c("Gasolina 95 E5", "Gasóleo A habitual")) %>% 
+  mutate(mes = floor_date(fecha, "month")) %>% 
+  group_by(mes, producto) %>% 
+  summarise(pvp = mean(pvp), pai = mean(pai), .groups = "drop")
+
+```
+
+Ahora que los datos estan listos, se representan en un sencillo gráfico de barras mediante la librería `ggplot2`. Concrétamente, el gráfico muestra que parte del *Precio de venta* son *Impuestos*, diferenciando entre ambos productos (`facet_wrap(~ producto)`)
+```{r grafico fluctuaciones + impuestos}
+
+
+
+ggplot(mensual, aes(x = mes)) +
+  geom_col(aes(y = pvp, fill = "Impuestos")) +
+  geom_col(aes(y = pai, fill = "Precio antes de impuestos")) +
+  facet_wrap(~ producto) +
+  labs(
+    title = "De qué se compone el precio de los carburantes (España peninsular, 2026)",
+    subtitle = "Precio medio mensual, €/litro",
+    x = NULL, y = "€/litro", fill = NULL,
+    caption = "Fuente: CNMC, Precios diarios provinciales 2026"
+  ) +
+  theme_minimal()
+```
+
+En un análisis de las serie podrían sacarse diversas conclusiones, como por ejemplo que la subida viene principalmente del precio de los combustibles antes de impuestos, el precio final subió menos que el precio antes de impuestos, porque la bajada de impuestos amortiguó parte de la subida. Además se podría tratar de buscar estacionalidad o anomalias, las cuales en esta ocasión. 
+
+En resumen, es un conjunto de datos útil para analizar el comportamiento provincial de los combustibles, o incluso preparar los datos para comparar la situación en España, entre otros posibles usos.
+
+# Bloque 2. APIs
+
+El Bloque 1 ha permitido describir cómo evoluciona en 2026 el precio de la gasolina y el gasóleo y qué parte corresponde a impuestos. Para que el trabajo mantenga su hilo conductor falta el otro lado de la relación, las matriculaciones de coches eléctricos, y este bloque se centra en él.*Eurostat* ofrece la serie histórica de matriculaciones de turismos nuevos en España según el tipo de motor y así observar qué peso tenían los eléctricos antes de 2026 y entonces utilizar la información con las matriculaciones de coches eléctricos de 2026 que se obtendrán en el *Bloque 3*. 
+
+La idea de este bloque es realizar la extracción del mismo conjunto dos maneras, una petición construida con `httr` y otra usando la librería `eurostat` dentro de R Studio.
+
+## Conjunto de datos y contexto
+
+Eurostat, la oficina estadística de la Unión Europea, publica sus datos a
+través de una API REST: un servicio web al que se le hace una petición HTTP
+y que responde con los datos en diferentes formatos. No es
+necesario registrarse ni usar ninguna clave, la petición funciona sin
+autenticación.
+
+De todos los conjuntos disponibles se ha elegido **New passenger cars by type
+of motor energy** (código `road_eqr_carpda`), que recoge las matriculaciones
+anuales de turismos nuevos según el tipo de motor (gasolina, diésel,
+eléctrico, híbrido, etc.) desde 2018 hasta 2025. 
+
+
+
+## Varaibles del conjunto de datos
+
+En cuanto al contenido del conjunto es en cierta medida complejo. Cada observación se identifica mediante cinco dimensiones y un valor. La dimensión `freq` indica la frecuencia temporal, que es anual (`A`), `unit` la unidad de medida, que es número de vehículos (`NR`), `geo` el territorio, que es España (`ES`), y `time` el año, entre 2018 y 2025. La dimensión `mot_nrg` es la que aporta el contenido, ya que clasifica los turismos por tipo de motor en 16 categorías, entre las que destacan `TOTAL` (todos los turismos), `PET` (gasolina), `DIE` (diésel), `ELC` (eléctricos puros) y variantes de híbridos, como `ELC_PET_PI` y `ELC_DIE_PI` para los enchufables. Por último, `value` es el número de turismos nuevos matriculados en cada combinación. Como `freq`, `unit` y `geo` solo toman un valor en esta consulta, no aportan información al análisis, se omitiran en la tabla resultante, que conserva únicamente `mot_nrg`, el año (`anio`) y el número de matriculaciones (`matriculaciones`).
+
+A partir de esa tabla se calculan tres variables propias, `total` y `electricos`, que recogen las matriculaciones de las categorías `TOTAL` y `ELC` en cada año, y `cuota_elec`, que es el cociente entre ambas y expresa el peso de los eléctricos sobre el conjunto del mercado.
+
+## Consulta 1: petición construida con `httr`
+
+### Preparación del conjunto para la creación de una tabla
+
+La petición se construye separando el servidor, la ruta y los parámetros de la consulta, por lo que en el código, `url_base` y `ruta` identifican la tabla `road_eqr_carpda`, y `parametros` es una lista  en la que `format = "JSON"` fija el formato de la respuesta, `lang = "EN"` el idioma de las etiquetas, `geo = "ES"` el territorio, `unit = "NR"` la unidad (número de vehículos) y `sinceTimePeriod = "2018"` el primer año. La función `GET` de `httr` combina las tres partes y envía la petición. Al fin del *chunk*, `respuesta$url` permite comprobar la URL final, en la que los parámetros aparecen separados por `&`.
+
+
+
+```{r eurostat_httr}
+url_base <- "https://ec.europa.eu"
+ruta     <- "eurostat/api/dissemination/statistics/1.0/data/road_eqr_carpda"
+parametros <- list(
+  format = "JSON",
+  lang   = "EN",
+  geo    = "ES",
+  unit   = "NR",
+  sinceTimePeriod = "2018"
+)
+
+respuesta <- GET(url = url_base, path = ruta, query = parametros)
+
+respuesta$url            # la URL final que ha construido la petición
+```
+Con `content(respuesta, as = "text", encoding = "UTF-8")` se extrae el cuerpo de la respuesta como texto y `fromJSON` lo convierte en un objeto manejable en R, en este caso, una lista (JSON). Usando`names(raw)` se obtiene la información que contiene la lista `raw`  y su etiqueta para poder seleccionarla, como por ejemplo,`updated` (fecha de última actualización), `id` y `size`, que describen las dimensiones, entre otros campos 
+```{r eurostat_estructura}
+texto <- content(respuesta, as = "text", encoding = "UTF-8")
+raw   <- fromJSON(texto)
+
+names(raw)
+
+raw$updated
+raw$id      # orden de las dimensiones
+raw$size    # tamaño de cada una
+```
+Es importante entender la descripción de las dimensiones que muestra `raw$id` y ´
+`raw$size`, de cuyo resultado se deduce que, tal y como se había mencionado previamente, solo  las categorias`mot_nrg` y `time` varían y que el conjunto contiene 16 × 8 = 128 valores posibles.
+
+### Creación de la tabla
+
+Para reconstruir la tabla se parte de la variable *energía*, usada para extraer la posicion de cada codigo que utiliza *Eurostat* para acortar el nombre del tipo de motor, y con el mismo procedimiento se crea `tiempo`, un vector que contiene los años de 2018 a 2025 convertido a número con `as.integer`.
+
+
+
+
+
+
+```{r eurostat_tabla P1}
+
+energia <- names(raw$dimension$mot_nrg$category$index)
+tiempo  <- as.integer(names(raw$dimension$time$category$label))
+
+energia
+tiempo
+
+
+```
+Eurostat entrega los valores en una única lista de 128 números sin etiquetas, ordenados motor por motor y, dentro de cada motor, año por año. Para saber a qué motor y año corresponde cada número hay que reconstruir ese mismo orden. Por ello, `expand_grid` genera todas las combinaciones de motor y año colocándolas exactamente así, y a cada fila se le asigna su posición en la lista, empezando por 0, que se calcula con `0:(nrow(tabla_httr) - 1)`.
+
+Con esas posiciones se buscan los valores. Los números de `raw$value` se agrupan con `unlist` en un vector donde cada valor lleva como nombre su posición, escrita como texto, por lo que las posiciones se convierten también a texto con `as.character` para poder buscarlas. Al indexar el vector con ellas, cada combinación de motor y año recibe su número de matriculaciones. Por último, `unname` elimina los nombres para que la columna `matriculaciones` quede como un simple vector numérico.
+
+
+
+A continuación, `expand_grid` genera todas las combinaciones de motor y año, replicando el orden de los valores originales para posteriormente los valores, `raw$value`, coincidan en motor y años. Sin embargo, para poder acceder a esos valores se crea la variable `posiciones`, que simplemente guarda las posiciones (0 a la 127) para después, al aplicar la función `unlist(raw$value)`, obtener todos los valores del vector, asegurando que el orden es correcto al indexarlos a la nueva columna `matriculaciones`.
+.
+```{r eurostat_tabla P2}
+
+
+tabla_httr <- expand_grid(mot_nrg = energia, anio = tiempo)
+posiciones <- as.character(0:(nrow(tabla_httr) - 1 ))
+tabla_httr$matriculaciones <- (unlist(raw$value)[posiciones])
+
+unique(tabla_httr$mot_nrg)
+```
+Se puede observar en la linea: `unique(tabla_httr$mot_nrg)`, como devuelve los 16 códigos de motor en el orden esperado.
+
+## Consulta 2: librería cliente
+
+En esta ocasión, la extracción es mucho más simple, gracias a la librería `Eurostat`, que únicamente con la función `get_eurostat` se construye la URL, envía la petición, lee el JSON y reconstruye la tabla (`lib_raw`). Concrétamente, la función recibe tres argumentos, el código del conjunto (road_eqr_carpda), la lista de flitros demandados, en este caso solo se seleccionan los datos de España, y por último el formato en el que se quieren las fechas (numérico). Finalmente, se usa `names(lib_raw)` para comprobar si las dimensiones son las correctas.
+```{r eurostat_libreria}
+lib_raw <- get_eurostat("road_eqr_carpda",
+                        filters = list(geo = "ES"),
+                        time_format = "num")
+names(lib_raw)
+```
+A continuación, se aplica un `filter` que selecciona los años requeridos y un `transmute` con las columnas seleccionadas para  obtener una versión limpia que contenga solo la información que se requiere para el análisis. 
+```{r eurostat_lib_limpio}
+
+tabla_lib <- lib_raw %>% 
+  filter(time >= 2018) %>% 
+  transmute(mot_nrg, anio = as.integer(time), matriculaciones = values)
+```
+
+### Comparación del resultado entre metodos (httr y libreria)
+
+En este punto, solo queda comprobar si existe alguna diferencias entre la información que contienen las dos tablas creadas.
+```{r eurostat_comprobacion}
+comparacion <- inner_join(tabla_httr, tabla_lib,
+                          by = c("mot_nrg", "anio"),
+                          suffix = c("_httr", "_lib"))
+
+nrow(comparacion)
+all(comparacion$matriculaciones_httr == comparacion$matriculaciones_lib, na.rm = TRUE)
+
+```
+En el resultado se observa como ambas comparten el mismo numero de filas y al realizar la comparación entre las respectivas columnas de la tabla `comparacion`, que une el resultado de ambos métodos en una misma, se obtiene `TRUE` como respuesta en la consola de R.
+
+
+### Resultado
+
+Para obtener el resultado final se parte de `tabla_httr` y se filtran con `filter` y el operador `%in%` solo las filas de los motores `TOTAL` y `ELC`. Después, `group_by(anio)` agrupa las filas por año, de modo que cada grupo contiene dos filas, y `summarise` reduce cada grupo a una sola. Dentro de `summarise`, `total` y `electricos` se obtienen seleccionando el valor de `matriculaciones` cuyo motor es `TOTAL` y `ELC` respectivamente, y `cuota_elec` se calcula como el cociente entre ambos. Por último, `.groups = "drop"` elimina la agrupación para que no afecte a operaciones posteriores.
+
+
+
+
+```{r eurostat_resultado}
+matric_es <- tabla_httr |>
+  filter(mot_nrg %in% c("TOTAL", "ELC")) |>
+  group_by(anio) |>
+  summarise(
+    total      = matriculaciones[mot_nrg == "TOTAL"],
+    electricos = matriculaciones[mot_nrg == "ELC"],
+    cuota_elec = electricos / total,
+    .groups = "drop"
+  )
+
+matric_es
+```
+En la tabla `matric_es` se observa que las matriculaciones de eléctricos pasan de 6.238 en 2018 a 105.074 en 2025, y que su cuota sube del 0,4 % al 8,7 %. El total de turismos nuevos baja hasta 2022 y se recupera después sin llegar al nivel de 2018, por lo que el aumento de la cuota se debe sobre todo al crecimiento de los eléctricos.
+
+
+# Bloque 3. Extracción web con Power Query
+
+Los datos proceden de Autonomía Coches Eléctricos, que los elabora a partir de los microdatos de matriculaciones de la DGT y los publica bajo licencia CC BY 4.0, por lo que se pueden reutilizar citando la fuente (Autonomía Coches Eléctricos, 2026).
+
+
+# Conexión entre los tres bloques y conclusiones
+
+Los tres bloques responden a la misma pregunta desde ángulos distintos. El Bloque 1 describe el lado del coste, ya que el precio de venta al público de la gasolina y el gasóleo aumenta a lo largo de 2026, sobre todo por el componente previo a impuestos, es decir, por el precio de la materia prima mientras que la parte impositiva pierde peso. El Bloque 2 aporta el contexto histórico de la demanda, con una cuota de eléctricos puros en las matriculaciones que pasa del 0,4 % en 2018 al 8,7 % en 2025. El Bloque 3 acerca ese contexto a 2026, con unas matriculaciones de 64.805 en el primer semestre, un 36 % más que en el mismo periodo de 2025. Las dos fuentes de matriculaciones son coherentes entre sí, ya que el primer semestre supone entre el 44 % y el 46 % del total anual de Eurostat en 2022-2025, lo que refuerza la fiabilidad de los datos extraídos con métodos distintos.
+
+En conjunto, los datos muestran que 2026 combina carburantes más caros y un crecimiento acelerado de los eléctricos, pero no permiten afirmar que lo primero explique lo segundo. Las fuentes cubren periodos y frecuencias distintas (precios diarios de 2026, matriculaciones anuales hasta 2025 y semestrales), las definiciones de eléctrico pueden no coincidir exactamente y en la evolución influyen otros factores, como las ayudas públicas, la oferta de modelos o la normativa de emisiones. La relación debe entenderse, por tanto, como una asociación descriptiva, y estudiar su posible causalidad exigiría series de precios y matriculaciones con la misma frecuencia y periodo.
+
+
+# Referencias
+
+Autonomía Coches Eléctricos. (2026). *Matriculaciones de turismos eléctricos* [Conjunto de datos]. Elaboración propia sobre los microdatos de matriculaciones de la DGT. Licencia CC BY 4.0. https://autonomiacocheselectricos.es/matriculaciones/ (consultado el 21/10/2026). Condiciones de uso: https://autonomiacocheselectricos.es/terminos-uso
+
+Comisión Nacional de los Mercados y la Competencia. (2026). *Precios diarios provinciales 2026* [Conjunto de datos]. Licencia CC BY-SA 4.0. https://catalogodatos.cnmc.es/dataset/d6498a3b-902d-4c89-b8d9-1cc1271e2359 (consultado el [REVISAR]/10/2026).
+
+Comisión Nacional de los Mercados y la Competencia. (s. f.). *Condiciones de uso de CNMC Data*. https://data.cnmc.es/condiciones-de-uso (consultado el 20/10/2026).
+
+Eurostat. (2026). *New passenger cars by type of motor energy* (road_eqr_carpda) [Conjunto de datos]. Comisión Europea. https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/road_eqr_carpda (consultado el 19/10/2026).
+
+Ministerio de Industria, Turismo y Comercio. (2007). *Orden ITC/2308/2007, de 25 de julio, por la que se determina la forma de remisión de información sobre los precios de los carburantes y combustibles petrolíferos*. Boletín Oficial del Estado. https://www.boe.es/buscar/doc.php?id=BOE-A-2007-14593
+
