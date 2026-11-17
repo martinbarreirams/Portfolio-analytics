@@ -1,0 +1,686 @@
+---
+title: "Tarea 2: Web scraping"
+author: "Martín Barreira Montesanto"
+lang: es
+format:
+  html:
+    embed-resources: true
+    toc: true
+---
+
+
+# Introducción
+
+Esta práctica pretende aplicar técnicas de *web scraping* para obtener, organizar y analizar información procedente de dos organismos públicos estadounidenses: la *Securities and Exchange Commission* **(SEC)** y la *Commodity Futures Trading Commission* **(CFTC)**.
+
+El trabajo se divide en dos partes complementarias. En la primera, se extraen y comparan las posiciones declaradas por tres gestores institucionales mediante documentos 13F-HR publicados en EDGAR. En la segunda, se automatiza con Chromium la navegación e inspección del portal de la CFTC y se recuperan los registros del informe *Commitments of Traders* mediante su API pública para estudiar el posicionamiento de diferentes grupos de operadores en los mercados de futuros financieros.
+
+De este modo, se logra explorar dos perspectivas diferentes del comportamiento de los participantes en los mercados financieros.
+
+## Librerías comunes
+
+Se utilizan tres paquetes de forma general en el documento. `dplyr` y `readr` facilitan la manipulación, limpieza e importación de datos, mientras que `ggplot2` se emplea para representar gráficamente los resultados.
+
+- `readr`: facilita la importación y exportación de datos tabulares, además de la conversión de valores a tipos adecuados.
+
+- `dplyr`: permite seleccionar, agrupar, transformar y resumir los datos.
+
+- `ggplot2`: permite crear gráficos y visualizaciones para representar los resultados del análisis de forma clara y facilitar su interpretación.
+
+```{r librerias_comunes, warning=FALSE, message=FALSE}
+
+library(dplyr)
+library(readr)
+library(ggplot2)
+
+```
+
+## Parte A: Scraping estático
+
+### Fuente de datos y condiciones de acceso
+Para la realización de la **Parte A** de la **Tarea 2** se ha seleccionado como fuente de información la página web de la Securities and Exchange Commission **(SEC)**, es decir, el organismo federal de Estados Unidos encargado de supervisar y regular los mercados de valores.
+
+Tal y como se ha mencionado, **EDGAR** (Electronic Data Gathering, Analysis, and Retrieval), un sistema público que permite consultar **documentación financiera y corporativa presentada por empresas cotizadas** y determinados participantes del mercado, ha sido el recurso ofrecido por la SEC y elegido para la extracción de datos. 
+
+
+En esta práctica se analizarán tres declaraciones 13F-HR publicadas en la plataforma EDGAR de la SEC, correspondientes a **NFJ Investment Group**, **SBI Okasan Asset Management** y **Banco Santander International**. Este tipo de documento recoge información detallada sobre las **posiciones declaradas por cada gestor al cierre del tercer trimestre de 2026 (30/09/2026)**. El objetivo es extraer y comparar las carteras declaradas por estas entidades, observando el número de posiciones, los valores con mayor peso y el grado de concentración.
+
+Los documentos consultados son de acceso público y se utilizan con fines académicos. Para las descargas automatizadas se siguen las condiciones de acceso de la SEC: se identifica cada petición mediante un *user agent* y se respeta el límite máximo de diez solicitudes por segundo establecido en su política de *Fair Access* (SEC, s. f.).
+
+Por último, los documentos utilizados aparecen publicados en EDGAR el 9 de noviembre de 2026 para NFJ Investment Group y el 10 de noviembre de 2026 para SBI Okasan Asset Management y Banco Santander. Las fechas se corresponden con las presentaciones consultadas en la SEC.
+
+### Librerías específicas de la Parte A
+
+Para esta parte se incorporan dos paquetes: `httr` y `rvest`. Ambos cumplen funciones distintas dentro del proceso de extracción:
+
+- `httr`: permite realizar peticiones HTTP para acceder y descargar los documentos de la SEC.
+
+- `rvest`: facilita la lectura de los documentos y la extracción de información mediante selectores XPath o CSS.
+
+
+```{r librerias_A, warning=FALSE, message=FALSE}
+
+library(httr)
+library(rvest)
+
+```
+### Importación e inspección inicial de los datos
+
+En primer lugar, se crea una carpeta llamada `data` en la que se guardan copias locales de los documentos descargados. Esto mejora la reproducibilidad de la práctica y evita solicitar reiteradamente los mismos archivos a la SEC.
+
+A continuación, se crea el objeto `fuentes` mediante `data.frame()`. Este contiene dos columnas: `gestor`, que identifica cada una de las entidades analizadas, y `url`, que almacena la dirección del documento XML correspondiente. Se incluyen las tres fuentes seleccionadas: NFJ, Banco Santander International y SBI_Okasan.
+
+Esta organización reúne las direcciones en una única estructura y facilita su procesamiento posterior mediante un mismo procedimiento, evitando escribir instrucciones independientes para cada entidad.
+
+
+```{r importacion_datos}
+dir.create("data", showWarnings = FALSE)
+
+fuentes <- data.frame(
+  gestor = c("NFJ", "Santander", "SBI_Okasan"),
+  url = c(
+    "https://www.sec.gov/Archives/edgar/data/1862664/000186266426000015/xslForm13F_X02/NFJ_13F_20261109083430.xml",
+    "https://www.sec.gov/Archives/edgar/data/891478/000089147826000101/xslForm13F_X02/information_table.xml",
+    "https://www.sec.gov/Archives/edgar/data/1535128/000153512826000012/xslForm13F_X02/20260930_13flist2026q3.xml"
+  )
+)
+
+
+```
+Antes de continuar, se inspecciona la estructura del documento 13F-HR de NFJ para justificar el criterio de extracción. El código descarga el archivo y lo guarda en `data/NFJ.html` si todavía no existe. Después, `rvest` localiza todas las filas (`//tr`) y muestra el contenido de las primeras quince. Así se observa la estructura original antes de aplicar filtros.
+```{r estructura}
+
+if (!file.exists("data/NFJ.html")) {
+  resp <- GET(fuentes$url[1], user_agent("Martin Barreira, Universidad de Valencia, marbamo4@alumni.uv.es"))
+  stop_for_status(resp)
+  writeLines(content(resp, as = "text", encoding = "UTF-8"), "data/NFJ.html")
+  Sys.sleep(1)
+}
+nfj <- read_html("data/NFJ.html", encoding = "UTF-8")
+
+nfj_strc <- html_elements(nfj, xpath = "//tr")
+html_text2(nfj_strc[1:15])
+
+```
+Se observa que las primeras filas contienen avisos legales, cabeceras y filas envoltorio. Algunas repiten el contenido de filas interiores, lo que refleja la estructura anidada del documento. Las filas con información de las posiciones contienen trece celdas, por lo que la extracción posterior se basa en ese criterio estructural.
+
+La estructura `fuentes` permite ahora crear la función `leer_13f`, que recibe como argumentos el nombre del gestor y la dirección de su documento XML. De este modo, el mismo procedimiento se aplica a las tres fuentes.
+
+Dentro de la función se construye la ruta local de cada documento y se almacena en `archivo`. La estructura condicional `if` comprueba si el archivo ya existe, evitando descargas innecesarias.
+
+Si el archivo no existe, se utiliza `GET()` para solicitar el documento a la SEC, identificando la petición mediante `user_agent()`. La función `stop_for_status()` comprueba que la respuesta HTTP sea correcta y detiene la ejecución si se produce un error. Después, `writeLines()` guarda el contenido descargado en la carpeta `data`. Finalmente, `Sys.sleep(1)` introduce una pausa de un segundo antes de continuar, reduciendo la frecuencia de las peticiones al servidor.
+
+El selector XPath `//tr[count(td)=13]` es la decisión principal de la extracción. En este documento, las tablas anidadas hacen que una conversión directa con `html_table()` no distinga adecuadamente las filas de datos de las filas envoltorio. El selector conserva las filas que tienen exactamente trece celdas directas. A continuación, `[-1]` elimina la primera fila seleccionada, que corresponde a la cabecera.
+
+De cada fila se extraen las celdas mediante el selector CSS `td`. Después, `lapply()` aplica la extracción a todas las filas y `do.call(rbind, ...)` las apila en una matriz, que se convierte en una tabla de R y recibe los nombres de columna correspondientes.
+
+Por último, la línea `tabla$gestor <- gestor` añade una columna con el nombre del gestor, necesaria para saber de dónde viene cada fila cuando las tres carteras se unen con `bind_rows`. `Map` aplica la función a cada pareja gestor-URL.
+
+
+```{r funcion-leer13f}
+leer_13f <- function(gestor, url) {
+  archivo <- file.path("data", paste0(gestor, ".html"))
+
+  if (!file.exists(archivo)) {
+    resp <- GET(url, user_agent("Martin Barreira, Universidad de Valencia, marbamo4@alumni.uv.es"))
+    stop_for_status(resp)
+    writeLines(content(resp, as = "text", encoding = "UTF-8"), archivo)
+    Sys.sleep(1)
+  }
+  pagina <- read_html(archivo, encoding = "UTF-8")
+  filas  <- html_elements(pagina, xpath = "//tr[count(td)=13]")[-1]
+  matriz <- do.call(rbind, lapply(filas, function(f) html_text2(html_elements(f, "td"))))
+
+  tabla <- as.data.frame(matriz)
+  names(tabla) <- c("emisor", "clase", "cusip", "figi", "valor",                  "acciones","tipo","put_call", "discrecion","otro_gestor","voto_solo", "voto_compartido", "voto_ninguno")
+  
+  tabla$gestor <- gestor
+  tabla
+} ### Acaba la función
+
+
+
+carteras <- bind_rows(Map(leer_13f, fuentes$gestor, fuentes$url))
+
+glimpse(carteras)
+table(carteras$gestor)
+```
+La función `glimpse()` ofrece una visión general de la estructura de los documentos y permite detectar aspectos que deberán tratarse durante la limpieza. La tabla resultante reúne **2023 filas y 14 columnas**: 374 corresponden a NFJ, 1333 a Santander y 316 a SBI Okasan. Se trata todavía de registros por fila de la SEC, no de valores únicos, por lo que antes de comparar las carteras es necesario agrupar las posiciones repetidas.
+
+
+
+### Limpieza y preparación
+
+La limpieza de los datos se divide en varias fases para facilitar su explicación.
+
+**1. Tipo de dato**
+
+Las columnas `valor` y `acciones` llegan de la SEC como texto, con comas como separador de miles, de modo que no se pueden sumar ni ordenar. Con `parse_number()` se eliminan esas comas y se convierten en números. A la vez, `trimws()` quita los espacios sobrantes al principio y al final del nombre del emisor, para que un mismo nombre no se trate como dos distintos por un espacio. Para comprobar que la conversión ha funcionado, se cuenta cuántos valores han quedado como `NA` en las dos columnas, y el resultado es cero en ambas.
+```{r limpieza_tipos}
+carteras <- carteras |>
+  mutate(
+    emisor   = trimws(emisor),
+    valor    = parse_number(valor),
+    acciones = parse_number(acciones)
+  )
+
+head(carteras, 5)
+
+colSums(is.na(carteras[c("valor", "acciones")]))
+
+```
+**2. Identificar qué contienen las filas**
+
+En el formulario 13F la columna `acciones` puede contener números de acciones o importes de bonos, y algunas filas corresponden a opciones (`PUT` o `CALL`) y no a la acción en sí. Para saber si hacía falta filtrar, se cuentan las filas por combinación de `tipo` y `put_call`. Las 2023 filas son de tipo `SH` y ninguna tiene un valor informado en `put_call`, por lo que no se identifican posiciones de opciones que deban excluirse.
+```{r conteo_tipos}
+count(carteras, tipo, put_call)
+```
+**3. Limpieza de columnas**
+
+
+Tal y como dejó ver `glimpse()` anteriormente, algunas columnas de la tabla no aportan información. Para detectarlas se usa `sapply()`, que aplica una misma operación a cada una de las columnas indicadas (`figi`, `put_call` y `tipo`). La operación es una función breve, `function(x) length(unique(x))`, en la que `x` representa cada columna por turno: `unique()` extrae sus valores distintos y `length()` los cuenta.Las tres columnas dan como resultado un único valor distinto, es decir, son constantes en todas las filas.
+
+Por otro lado, las columnas `discrecion`, `otro_gestor` y las tres relacionadas con la autoridad de voto no son necesarias para comparar las carteras. Por tanto, se conservan únicamente `gestor`, `emisor`, `clase`, `cusip`, `valor` y `acciones`, lo que deja una tabla más pequeña y fácil de manejar.
+```{r limp-columnas}
+
+sapply(carteras[c("figi", "put_call", "tipo")], function(x) length(unique(x)))
+
+carteras <- carteras |>
+  select(gestor, emisor, clase, cusip, valor, acciones)
+
+```
+
+**4. Agrupación por valor**
+
+Como un mismo valor puede aparecer en varias filas del informe, se agrupan los registros por gestor y por `cusip`, identificador del valor. Así se obtiene una única fila por combinación de gestor y valor.
+```{r reduccion-filas-emisores}
+antes <- count(carteras, gestor, name = "filas_antes")
+
+carteras <- carteras |>
+  group_by(gestor, cusip) |>
+  summarise(
+    emisor   = first(emisor),
+    clase    = first(clase),
+    valor    = sum(valor),
+    acciones = sum(acciones),
+    .groups  = "drop"
+  )
+
+left_join(antes, count(carteras, gestor, name = "filas_despues"), by = "gestor")
+```
+El resultado muestra que la reducción de filas es especialmente significativa en el caso de Santander, donde el número de registros agrupados queda por debajo de la mitad del recuento inicial.
+
+
+**5. Peso de cada posición**
+
+Para comparar carteras de tamaños muy distintos se calcula el peso de cada posición sobre el valor total de su cartera. Así se comparan proporciones, independientemente del tamaño absoluto de cada gestor. 
+
+Se agrupa por `gestor` con `group_by()` y con `mutate()` se calcula el peso, `ungroup()` deshace la agrupación y `arrange()` ordena la tabla por gestor y de mayor a menor peso, de forma que las posiciones principales de cada cartera quedan arriba. Como comprobación, se obtiene la suma de pesos por gestor, la cual debe ser 1 en los tres casos.
+
+```{r pesos}
+
+carteras <- carteras |>
+  group_by(gestor) |>
+  mutate(peso = valor / sum(valor)) |>
+  ungroup() |>
+  arrange(gestor, desc(peso))
+
+carteras |>
+  group_by(gestor) |>
+  summarise(suma_pesos = sum(peso))
+```
+**6. Guardado post-limpieza**
+
+La tabla limpia se guarda en `data/carteras_limpias.csv`. Así queda incluida en el ZIP junto a los HTML descargados y el análisis puede reproducirse sin repetir la limpieza.
+
+```{r guardado}
+write_csv(carteras, "data/carteras_limpias.csv")
+carteras
+```
+
+### Análisis de las carteras
+
+Para comparar las carteras se calcula, por gestor, el número de posiciones (`n()`), el valor total en millones de dólares y la concentración, que es la suma del peso de las diez mayores posiciones. El valor total se convierte a millones de dólares dividiendo entre 1.000, porque el campo `valor` del informe 13F está expresado en miles de dólares. La concentración se obtiene ordenando los pesos de mayor a menor con `sort()` y sumando los diez primeros. Cuanto mayor es la cifra, más depende la cartera de pocas acciones.
+
+```{r}
+resumen <- carteras |>
+  group_by(gestor) |>
+  summarise(
+    posiciones  = n(),
+    valor_total_millones = sum(valor, na.rm = TRUE) / 1000,
+    peso_top10  = sum(sort(peso, decreasing = TRUE)[1:10])
+  )
+
+resumen
+```
+
+Para ver en qué está invertido cada gestor se seleccionan sus siete mayores posiciones con `slice_max(peso, n = 7)` y se representan en un gráfico de barras horizontal con un panel por gestor (`facet_wrap`). El gráfico muestra el nombre de las empresas principales de cada cartera y el porcentaje del valor total que representa cada una.
+
+```{r prep_grafico2_parteA}
+top7 <- carteras |>
+  group_by(gestor) |>
+  slice_max(peso, n = 7) |>
+  ungroup()
+```
+
+Para saber si los gestores coinciden en sus inversiones se conservan los CUSIP que aparecen en más de un gestor (`n_distinct(gestor) > 1`) y se indica en qué gestores aparece cada uno con `paste()`. La tabla de recuento muestra cuántos valores, identificados por su CUSIP, comparte cada combinación de gestores.
+
+```{r}
+
+ggplot(top7, aes(x = peso, y = reorder(emisor, peso))) +
+  geom_col() +
+  facet_wrap(~ gestor, scales = "free_y", ncol = 1) +
+  scale_x_continuous(labels = scales::percent) +
+  labs(x = "Peso en la cartera", y = NULL,
+       title = "Las siete mayores posiciones de cada gestor")
+```
+```{r valores_compartidos}
+comunes <- carteras |>
+  group_by(cusip) |>
+  filter(n_distinct(gestor) > 1) |>
+  summarise(emisor   = first(emisor),
+            gestores = paste(sort(gestor), collapse = " + "),
+            .groups  = "drop")
+
+count(comunes, gestores)
+```
+#### Resultados
+
+Las carteras difieren en tamaño y concentración. Santander es la mayor, con 618 posiciones y unos 18.906 millones de dólares, frente a NFJ (230 posiciones, 2.799 millones) y SBI Okasan (316 posiciones, 3.185 millones). Los importes se expresan en millones de dólares, teniendo en cuenta que el campo `valor` de los formularios 13F está expresado en miles de dólares. Las diez mayores posiciones suponen el 30,4 % de la cartera de NFJ, el 49,3 % de la de Santander y el 88,1 % de la de SBI Okasan.
+
+El gráfico, con las siete mayores posiciones de cada gestor, aclara el origen. NFJ reparte su cartera entre grandes empresas sin que ninguna destaque. En Santander sobresale Banco Santander Brasil (alrededor del 15 %), seguido de tecnológicas como Microsoft, Salesforce y Apple. SBI Okasan invierte sobre todo en ETF: el Vanguard Total Stock Market pesa cerca del 35 %, por lo que su concentración es de fondos diversificados y no de empresas.
+
+En total, 228 valores identificados por su CUSIP aparecen en más de un gestor y 47 están presentes en los tres. Santander y SBI Okasan comparten el mayor número (172). Microsoft, Apple y Amazon también aparecen entre las principales posiciones de NFJ y Santander.
+
+## Parte B: Scraping dinámico/scraping automatizado 
+
+
+
+### Librerías específicas de la Parte B
+
+En esta parte se incorpora `chromote`, que permite controlar un navegador Chromium desde R y automatizar acciones sobre la página de la CFTC. El paquete `httr`, cargado en la Parte A, se reutiliza posteriormente para consultar la API.
+
+```{r librerias_B, warning=FALSE, message=FALSE}
+library(chromote)
+```
+
+### Acceso al portal e inspección inicial
+
+Se inicia una sesión de Chromium mediante `ChromoteSession$new()` y se accede al portal público de la CFTC con `Page$navigate()`. La función auxiliar `esperar()` comprueba de forma periódica una condición JavaScript hasta que se cumple o se agota el tiempo máximo. De este modo, las operaciones posteriores no dependen únicamente de pausas fijas.
+
+```{r acceso_inspeccion, results='hide'}
+b <- ChromoteSession$new()
+
+b$Page$navigate("https://publicreporting.cftc.gov/stories/s/r4w3-av2u")
+
+esperar <- function(b, condicion_js, max_seg = 20, paso = 0.5) {
+  inicio <- Sys.time()
+  repeat {
+    ok <- b$Runtime$evaluate(
+      expression = condicion_js,
+      returnByValue = TRUE
+    )$result$value
+    if (isTRUE(ok)) return(invisible(TRUE))
+    if (as.numeric(difftime(Sys.time(), inicio, units = "secs")) > max_seg) {
+      stop("Tiempo de espera agotado: ", condicion_js)
+    }
+    Sys.sleep(paso)
+  }
+}
+
+esperar(b, "document.readyState === 'complete'")
+b$Runtime$evaluate("document.title", returnByValue = TRUE)$result$value
+```
+
+### Inspección de la página e identificación de elementos
+
+Se inspeccionan los elementos interactivos del portal para conocer su estructura antes de automatizar acciones. `querySelectorAll()` recupera los elementos que coinciden con los selectores CSS; `Array.from()` los convierte en un array de JavaScript y `map()` recoge sus atributos principales. Esta inspección permite identificar los controles y localizar el acceso al informe TFF.
+
+```{r inspeccion_portal}
+controles <- b$Runtime$evaluate(
+  expression = "JSON.stringify(
+    Array.from(document.querySelectorAll(
+      'input, select, button, [role=combobox], [role=button]'
+    )).map(e => ({
+      elemento: e.tagName,
+      tipo: e.getAttribute('type'),
+      texto: (e.innerText || '').trim(),
+      etiqueta: e.getAttribute('aria-label'),
+      marcador: e.getAttribute('placeholder'),
+      rol: e.getAttribute('role')
+    }))
+  )",
+  returnByValue = TRUE
+)
+
+cat(controles$result$value)
+```
+
+A continuación, se localiza el enlace *TFF Futures Only Report*. Se filtran los enlaces de la página a partir de su texto y de su dirección web para seleccionar el informe que se utilizará en la práctica.
+
+```{r localizacion_TFF}
+resultado <- b$Runtime$evaluate(
+  expression = "JSON.stringify(
+    Array.from(document.querySelectorAll('a, button'))
+      .map(e => ({
+        tipo: e.tagName,
+        texto: (e.innerText || e.getAttribute('aria-label') || '').trim(),
+        url: e.href || ''
+      }))
+      .filter(x => /TFF|Financial|Futures Only/i.test(x.text + ' ' + x.url))
+  )",
+  returnByValue = TRUE
+)
+
+cat(resultado$result$value)
+
+enlace_tff <- b$Runtime$evaluate(
+  expression = "Array.from(document.querySelectorAll('a'))
+    .find(e => e.innerText.trim() === 'TFF Futures Only Report')?.href",
+  returnByValue = TRUE
+)$result$value
+
+if (is.null(enlace_tff) || length(enlace_tff) == 0) {
+  stop("No se ha encontrado el enlace al informe TFF.")
+}
+
+url_tff <- enlace_tff
+```
+
+### Interacción automatizada con el portal
+
+Se realizan tres acciones sobre la página: un desplazamiento hasta el enlace del informe, la apertura del menú de informes y la activación del enlace TFF. En la sesión de trabajo, el clic sobre el enlace cerró el menú, pero no actualizó la dirección de la página; por ello, se conserva la interacción y se utiliza como alternativa `Page$navigate()` con la URL previamente localizada. Esta distinción permite documentar qué acción de la interfaz se ejecuta y cómo se resuelve el acceso al informe.
+
+**1. Desplazamiento hasta el informe.** `scrollIntoView()` desplaza la página hasta el enlace localizado. Después se consulta `window.scrollY` para observar la posición vertical del navegador.
+
+```{r desplazamiento_TFF}
+b$Runtime$evaluate(
+  expression = "Array.from(document.querySelectorAll('a'))
+    .find(e => e.innerText.trim() === 'TFF Futures Only Report')
+    ?.scrollIntoView({ behavior: 'instant', block: 'center' })",
+  returnByValue = TRUE
+)
+
+Sys.sleep(2)
+posicion_scroll <- b$Runtime$evaluate(
+  expression = "window.scrollY",
+  returnByValue = TRUE
+)$result$value
+
+posicion_scroll
+```
+
+**2. Apertura del menú de informes.** Se pulsa el botón `Existing CFTC Reports`. El atributo `aria-expanded` permite comprobar que el menú queda abierto.
+
+```{r apertura_menu_TFF}
+b$Runtime$evaluate(
+  expression = "Array.from(document.querySelectorAll('button'))
+    .find(e => e.innerText.trim() === 'Existing CFTC Reports')
+    ?.click()",
+  returnByValue = TRUE
+)
+
+esperar(
+  b,
+  "Array.from(document.querySelectorAll('button')).some(e =>
+    e.innerText.trim() === 'Existing CFTC Reports' &&
+    e.getAttribute('aria-expanded') === 'true')"
+)
+menu_abierto <- b$Runtime$evaluate(
+  expression = "Array.from(document.querySelectorAll('button'))
+    .find(e => e.innerText.trim() === 'Existing CFTC Reports')
+    ?.getAttribute('aria-expanded')",
+  returnByValue = TRUE
+)$result$value
+
+menu_abierto
+```
+
+**3. Activación del enlace TFF y acceso al informe.** Se intenta acceder mediante un clic sobre el enlace. Como en la comprobación realizada el menú se cerró sin completar la navegación, se verifica el título y, si es necesario, se utiliza la dirección obtenida previamente.
+
+```{r acceso_informe_TFF}
+b$Runtime$evaluate(
+  expression = "Array.from(document.querySelectorAll('a'))
+    .find(e => e.innerText.trim() === 'TFF Futures Only Report')
+    ?.click()",
+  returnByValue = TRUE
+)
+
+Sys.sleep(3)
+titulo_actual <- b$Runtime$evaluate(
+  expression = "document.title",
+  returnByValue = TRUE
+)$result$value
+
+if (!grepl("TFF - Futures Only", titulo_actual, fixed = TRUE)) {
+  b$Page$navigate(url_tff)
+  esperar(b, "document.readyState === 'complete'")
+}
+
+confirmacion_TFF <- b$Runtime$evaluate(
+  expression = "JSON.stringify({
+    titulo: document.title,
+    url: window.location.href
+  })",
+  returnByValue = TRUE
+)$result$value
+
+confirmacion_TFF
+```
+
+La secuencia anterior permite localizar el informe, interactuar con los elementos del portal y acceder al informe mediante el navegador. La extracción de los registros se realiza a continuación mediante la API pública asociada al conjunto de datos TFF Futures Only. Así se evita depender de la carga visual de la tabla para descargar todos los registros del contrato y del periodo seleccionados.
+
+### Consulta de datos mediante la API de la CFTC
+
+La exploración inicial de la API permitió identificar el contrato `NASDAQ MINI`, con código CFTC `209742`, negociado en el Chicago Mercantile Exchange. Como esta identificación ya se comprobó durante el desarrollo, se fija aquí el contrato seleccionado para evitar repetir una consulta exploratoria en cada renderizado. La consulta de datos se realiza en el siguiente bloque. Las interacciones con la interfaz se documentan por separado y no se contabiliza la consulta a la API como una interacción de navegador.
+
+```{r identificar_contrato}
+url_api <- "https://publicreporting.cftc.gov/resource/gpe5-46if.json"
+
+contratos <- tibble(
+  contract_market_name = "NASDAQ MINI",
+  cftc_contract_market_code = "209742",
+  market_and_exchange_names = "NASDAQ MINI - CHICAGO MERCANTILE EXCHANGE"
+)
+
+contratos
+```
+
+
+
+### Extracción de los datos y comprobación
+
+```{r extraccion}
+fecha_inicio <- "2024-11-11T00:00:00"
+fecha_fin <- "2026-11-11T23:59:59"
+
+archivo_bruto_TFF <- "data/TFF_Nasdaq_Mini_bruto.csv"
+
+if (file.exists(archivo_bruto_TFF)) {
+  # Si ya existe una extracción guardada, se reutiliza y no se vuelve a llamar a la API.
+  datos_brutos_b <- read_csv(archivo_bruto_TFF, show_col_types = FALSE)
+} else {
+  # Si no existe una copia local, se consulta la API con un tiempo de espera
+  # mayor y varios intentos ante fallos temporales de conexión.
+  respuesta <- RETRY(
+    "GET",
+    url_api,
+    query = list(
+      "$select" = paste(
+        "report_date_as_yyyy_mm_dd",
+        "market_and_exchange_names",
+        "contract_market_name",
+        "cftc_contract_market_code",
+        "open_interest_all",
+        "asset_mgr_positions_long",
+        "asset_mgr_positions_short",
+        "lev_money_positions_long",
+        "lev_money_positions_short",
+        sep = ", "
+      ),
+      "$where" = paste0(
+        "contract_market_name = 'NASDAQ MINI'",
+        " AND report_date_as_yyyy_mm_dd >= '", fecha_inicio, "'",
+        " AND report_date_as_yyyy_mm_dd <= '", fecha_fin, "'"
+      ),
+      "$order" = "report_date_as_yyyy_mm_dd ASC",
+      "$limit" = 5000
+    ),
+    config = timeout(120),
+    times = 5,
+    pause_base = 2,
+    pause_cap = 30,
+    quiet = FALSE,
+    terminate_on_success = FALSE
+  )
+
+  stop_for_status(respuesta)
+
+  datos_brutos_b <- bind_rows(
+    content(respuesta, as = "parsed", encoding = "UTF-8")
+  )
+
+  if (nrow(datos_brutos_b) == 0) {
+    stop("La consulta a la API no ha devuelto registros.")
+  }
+
+  write_csv(datos_brutos_b, archivo_bruto_TFF)
+}
+
+datos_brutos_b
+```
+
+```{r comprobacion_datos}
+dim(datos_brutos_b)
+
+names(datos_brutos_b)
+
+range(
+  as.Date(datos_brutos_b$report_date_as_yyyy_mm_dd)
+)
+
+head(datos_brutos_b)
+
+# Comprobar contratos y mercados
+unique(datos_brutos_b$contract_market_name)
+
+unique(datos_brutos_b$cftc_contract_market_code)
+
+unique(datos_brutos_b$market_and_exchange_names)
+
+# Comprobar valores ausentes
+colSums(is.na(datos_brutos_b))
+
+# Comprobar posibles registros duplicados
+sum(duplicated(datos_brutos_b$report_date_as_yyyy_mm_dd))
+```
+
+
+### Limpieza y preparación
+
+La limpieza convierte la fecha al tipo `Date` y las variables de posiciones e interés abierto a formato numérico. Después se calculan dos medidas de posicionamiento neto: posiciones largas menos posiciones cortas para las categorías `Asset Manager` y `Leveraged Money`, tal como aparecen en el conjunto de datos de la CFTC. Un valor positivo indica un saldo neto largo; uno negativo, un saldo neto corto.
+
+```{r limpieza_TFF}
+datos_b <- datos_brutos_b %>%
+  mutate(
+    report_date_as_yyyy_mm_dd = as.Date(report_date_as_yyyy_mm_dd),
+    across(
+      c(
+        open_interest_all,
+        asset_mgr_positions_long,
+        asset_mgr_positions_short,
+        lev_money_positions_long,
+        lev_money_positions_short
+      ),
+      as.numeric
+    ),
+    neto_asset_mgr = asset_mgr_positions_long -
+      asset_mgr_positions_short,
+    neto_lev_money = lev_money_positions_long -
+      lev_money_positions_short
+  )
+```
+
+```{r comprobacion_limpieza_TFF}
+# Comprobar la estructura y las nuevas variables
+glimpse(datos_b)
+
+# Visualizar los primeros registros
+head(datos_b)
+
+# Resumen estadístico de las posiciones netas
+summary(datos_b[, c("neto_asset_mgr", "neto_lev_money")])
+```
+
+
+
+```{r guardado_TFF}
+write_csv(
+  datos_b,
+  "data/TFF_Nasdaq_Mini_limpio.csv"
+)
+```
+
+
+### Análisis y resultados
+
+El análisis compara el saldo neto semanal de los dos grupos seleccionados. Además de resumir sus valores medios y extremos, se representa su evolución temporal. La diferencia entre posiciones largas y cortas permite observar si cada grupo mantiene un posicionamiento neto largo o corto en el contrato `NASDAQ MINI`.
+
+```{r resumen_TFF}
+resumen_b <- datos_b |>
+  summarise(
+    registros = n(),
+    fecha_inicial = min(report_date_as_yyyy_mm_dd, na.rm = TRUE),
+    fecha_final = max(report_date_as_yyyy_mm_dd, na.rm = TRUE),
+    media_neta_asset_mgr = mean(neto_asset_mgr, na.rm = TRUE),
+    minimo_neto_asset_mgr = min(neto_asset_mgr, na.rm = TRUE),
+    maximo_neto_asset_mgr = max(neto_asset_mgr, na.rm = TRUE),
+    media_neta_lev_money = mean(neto_lev_money, na.rm = TRUE),
+    minimo_neto_lev_money = min(neto_lev_money, na.rm = TRUE),
+    maximo_neto_lev_money = max(neto_lev_money, na.rm = TRUE)
+  )
+
+resumen_b
+```
+
+```{r grafico_TFF, fig.width=10, fig.height=6}
+ggplot(datos_b, aes(x = report_date_as_yyyy_mm_dd)) +
+  geom_line(aes(y = neto_asset_mgr, color = "Asset Manager"), linewidth = 0.7) +
+  geom_line(aes(y = neto_lev_money, color = "Leveraged Money"), linewidth = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  labs(
+    title = "Posicionamiento neto en futuros del NASDAQ MINI",
+    subtitle = "Posiciones largas menos posiciones cortas, por semana",
+    x = "Fecha del informe",
+    y = "Contratos netos",
+    color = "Categoría de operadores",
+    caption = "Fuente: elaboración propia a partir de datos de la CFTC (TFF Futures Only)."
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+En las 104 observaciones obtenidas, `Asset Manager` presenta un saldo neto largo durante todo el periodo: la media es de aproximadamente 68.645 contratos y los valores observados se sitúan entre 33.676 y 92.301. En cambio, `Leveraged Money` registra una media neta corta de aproximadamente 28.730 contratos, con un mínimo de -89.125 y un máximo de 17.619. Por tanto, aunque su posicionamiento cambia a lo largo del periodo, predomina el saldo corto.
+
+Estas medidas describen el posicionamiento agregado de las categorías de operadores en el contrato analizado. No permiten identificar las decisiones de participantes individuales ni demostrar por sí solas una expectativa sobre la evolución futura del índice.
+
+## Bibliografía
+
+Commodity Futures Trading Commission. (s. f.). *TFF - Futures Only*. Public Reporting Environment. https://publicreporting.cftc.gov/stories/s/TFF-Futures-Only/98ig-3k9y/
+
+Commodity Futures Trading Commission. (s. f.). *TFF - Futures Only: conjunto de datos*. https://publicreporting.cftc.gov/Commitments-of-Traders/TFF-Futures-Only/gpe5-46if
+
+Commodity Futures Trading Commission. (s. f.). *Commitments of Traders: explanatory notes and frequently asked questions*. https://www.cftc.gov/MarketReports/CommitmentsofTraders/ExplanatoryNotes/index.htm
+
+Securities and Exchange Commission. (s. f.). *Accessing EDGAR data*. https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data
+
+Securities and Exchange Commission. (2023, 24 de mayo; actualización de 6 de marzo de 2026). *Frequently asked questions about Form 13F*. https://www.sec.gov/rules-regulations/staff-guidance/frequently-asked-questions-about-form-13f
+
+Wickham, H., François, R., Henry, L., Müller, K., & Vaughan, D. (s. f.). *dplyr: A grammar of data manipulation*. The Comprehensive R Archive Network. https://cran.r-project.org/package=dplyr
+
+U.S. Securities and Exchange Commission. (s. f.). *EDGAR: Search and access filings*. https://www.sec.gov/edgar
+
+U.S. Securities and Exchange Commission. (s. f.). *Form 13F: Information required of institutional investment managers*. https://www.sec.gov/files/form13f.pdf
+
+U.S. Securities and Exchange Commission. (s. f.). *Accessing EDGAR data (política de acceso justo y declaración del User-Agent)*. https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data
+
