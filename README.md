@@ -13,5 +13,4 @@ Ejercicios prácticos de análisis de datos, hechos como parte de mi proceso de 
 
 - **Proyecto Web scraping**: Análisis de las carteras que NFJ Investment Group, SBI Okasan y Banco Santander declaran a la SEC en sus informes 13F-HR, y analizo cómo han cambiado las posiciones netas de Asset Managers y Leveraged Money en futuros del NASDAQ MINI, con datos de la CFTC. Hecho en R con httr, rvest, dplyr y ggplot2.
 [Ver resultado](https://github.com/martinbarreirams/Portfolio-analytics/blob/main/Web_scraping/index.html) ·
-[Ver resultado]() ·
-  [Ver código](https://github.com/martinbarreirams/Portfolio-analytics/blob/main/Web_scraping/Proyecto_web_scraping.qmd)
+[Ver código](https://github.com/martinbarreirams/Portfolio-analytics/blob/main/Web_scraping/Proyecto_web_scraping.qmd)
